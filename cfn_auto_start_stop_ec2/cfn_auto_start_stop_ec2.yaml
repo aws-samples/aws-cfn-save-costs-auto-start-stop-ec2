@@ -1,0 +1,727 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This Cloudformation template creates resources to Schedule Auto Start-Stop of EC2 instances to save cost.
+  This involves creating 1 IAM Role with inline Policy, 6 Lambda functions with Permissions and 4 EventBridge Rules.
+  User also gets 5 Parameter options, in which 4 to be set in EventBridge Rules and 1 to set in Lambda Functions Environment variable.
+  Written by - Pinesh Singal (spinesh@), last modified 21-Dec-2021
+
+Parameters:
+  AutoStartEC2Schedule:
+    Default: cron(0 13 ? * MON-FRI *)
+    Description: Auto Start EC2 Instance (Mon-Fri 9:00 AM EST / 1:00 PM GMT), enter a Schedule expression e.g. cron(0 13 ? * MON-FRI *), see https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  AutoStopEC2Schedule:
+    Default: cron(0 1 ? * MON-FRI *)
+    Description: Auto Stop EC2 Instance (Mon-Fri 9:00 PM EST / 1:00 AM GMT), enter a Schedule expression e.g. cron(0 1 ? * MON-FRI *), see https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  EC2StartStopWeekDaySchedule:
+    Default: cron(*/5 * ? * MON-FRI *)
+    Description: EC2 Start Stop triggering every Week Day every 5 mins
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  EC2StartStopWeekEndSchedule:
+    Default: cron(*/5 * ? * SAT-SUN *)
+    Description: EC2 Start Stop triggering every Week End every 5 mins
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  RegionTZ:
+    Default: UTC
+    Type: String
+    AllowedValues:
+      - UTC
+      - US/Eastern
+      - US/Pacific
+      - Africa/Johannesburg
+      - Asia/Hong_Kong
+      - Asia/Kolkata
+      - Asia/Tokyo
+      - Asia/Seoul
+      - Asia/Singapore
+      - Australia/Sydney
+      - Canada/Central
+      - Europe/Berlin
+      - Europe/Dublin
+      - Europe/London
+      - Europe/Rome
+      - Europe/Paris
+      - Europe/Stockholm
+      - Asia/Bahrain
+      - America/Sao_Paulo
+    Description: Select Timezone of your Region for execution time in Tags (Set as Lambda Environment Variable Key REGION_TZ)
+
+Resources:
+  LambdaEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      #RoleName: LambdaEC2StartStopRole
+      Description: IAM Role for Lambda to Start Stop EC2 instances
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaEC2StartStopPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+                Resource: arn:aws:ec2:*:*:instance/*
+              - Effect: Allow
+                Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+                Resource: '*'
+
+  AutoStartEC2Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AutoStartEC2Instance
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt
+        - LambdaEC2Role
+        - Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Code:
+        ZipFile: |
+            import boto3
+            import logging
+            import os
+
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+
+            region = os.environ['AWS_REGION']
+            ec2 = boto3.resource('ec2', region_name=region)
+
+            def lambda_handler(event, context):
+
+                filters = [
+                    {
+                        'Name': 'tag:AutoStart',
+                        'Values': ['TRUE','True','true']
+                    },
+                    {
+                        'Name': 'instance-state-name',
+                        'Values': ['stopped']
+                    }
+                ]
+
+                instances = ec2.instances.filter(Filters=filters)
+                StoppedInstances = [instance.id for instance in instances]
+                print("Stopped Instances with AutoStart Tag : " + str(StoppedInstances))
+
+                if len(StoppedInstances) > 0:
+                    for instance in instances:
+                        if instance.state['Name'] == 'stopped':
+                            print("Starting Instance : " + instance.id)
+                    AutoStarting = ec2.instances.filter(InstanceIds=StoppedInstances).start()
+                    print("Started Instances : " + str(StoppedInstances))
+                else:
+                    print("Instance not in Stopped state or AutoStart Tag not set...")
+      Description: >-
+        Auto Start EC2 Instance (from tag : AutoStart)
+
+  AutoStartEC2Rule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name : AutoStartEC2Rule
+      Description: Auto Start EC2 Instance (Mon-Fri 9:00 AM EST / 1:00 PM GMT)
+      ScheduleExpression: !Ref AutoStartEC2Schedule
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt AutoStartEC2Lambda.Arn
+          Id: AutoStartEC2Lambda
+
+  AutoStartEC2LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AutoStartEC2Lambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn : !GetAtt AutoStartEC2Rule.Arn
+
+  AutoStopEC2Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AutoStopEC2Instance
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt
+        - LambdaEC2Role
+        - Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Code:
+        ZipFile: |
+            import boto3
+            import logging
+            import os
+
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+
+            region = os.environ['AWS_REGION']
+            ec2 = boto3.resource('ec2', region_name=region)
+
+            def lambda_handler(event, context):
+
+                filters = [
+                    {
+                        'Name': 'tag:AutoStop',
+                        'Values': ['TRUE','True','true']
+                    },
+                    {
+                        'Name': 'instance-state-name',
+                        'Values': ['running']
+                    }
+                ]
+
+                instances = ec2.instances.filter(Filters=filters)
+                RunningInstances = [instance.id for instance in instances]
+                print("Running Instances with AutoStop Tag : " + str(RunningInstances))
+
+                if len(RunningInstances) > 0:
+                    for instance in instances:
+                        if instance.state['Name'] == 'running':
+                            print("Stopping Instance : " + instance.id)
+                    AutoStopping = ec2.instances.filter(InstanceIds=RunningInstances).stop()
+                    print("Stopped Instances : " + str(RunningInstances))
+                else:
+                    print("Instance not in Running state or AutoStop Tag not set...")
+      Description: >-
+        Auto Stop EC2 Instance (from tag : AutoStop)
+
+  AutoStopEC2Rule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name : AutoStopEC2Rule
+      Description: Auto Stop EC2 Instance (Mon-Fri 9:00 PM EST / 1:00 AM GMT)
+      ScheduleExpression: !Ref AutoStopEC2Schedule
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt AutoStopEC2Lambda.Arn
+          Id: AutoStopEC2Lambda
+
+  AutoStopEC2LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AutoStopEC2Lambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn : !GetAtt AutoStopEC2Rule.Arn
+
+  EC2StopWeekEndLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EC2StopWeekEnd
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt
+        - LambdaEC2Role
+        - Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Code:
+        ZipFile: |
+            import boto3
+            import time
+            import datetime
+            import os
+
+            def set_region_tz():
+                timezone_var = None
+                #print(os.environ)
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+
+                try:
+                    timezone_var = os.environ['REGION_TZ']
+                    print("Lambda Environment Variable Key REGION_TZ available : " + str(timezone_var))
+                except Exception as e:
+                    timezone_var = os.environ['TZ']
+                    print("Lambda Environment Variable Key REGION_TZ not available : " + str(timezone_var))
+                print("Timezone Var : " + str(timezone_var))
+
+                if timezone_var is None or timezone_var == '':
+                    timezone = 'UTC'
+                else:
+                    timezone = timezone_var
+                print("Timezone : " + str(timezone))
+
+                os.environ['TZ'] = str(timezone)
+                time.tzset()
+                return
+
+            def lambda_handler(event, context):
+                flag = False
+                set_region_tz()
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+                week_day = datetime.datetime.now().isoweekday()  # Monday is 1 and Sunday is 7
+                time_plus = time_now + datetime.timedelta(minutes=5)
+                time_minus = time_now - datetime.timedelta(minutes=5)
+                aest_time = format(time_now, '%H:%M')
+                print("Week Day : " + str(week_day))
+                print("Time Now in HH:MM : " + aest_time)
+                max_aest_time = format(time_plus,'%H:%M')
+                min_aest_time = format(time_minus,'%H:%M')
+                count = 0
+
+                region = os.environ['AWS_REGION']
+                print("Region : " + str(region))
+
+                ec2 = boto3.client("ec2", region_name=region)
+                description = ec2.describe_instances()
+
+                for instances in description["Reservations"]:
+                    for instance in instances["Instances"]:
+                        #print ('instance :- ' + str(instance))
+                        count = count + 1
+                        if 'Tags' in instance:
+                            for tag in instance["Tags"]:
+                                if (tag["Key"] == "StopWeekEnd"):
+                                    StopWeekEnd_TagFound = True
+                                    stopTime = tag["Value"]
+                                    print("StopWeekEnd Stop Time : " + stopTime)
+                                    if (min_aest_time <= stopTime <= max_aest_time and 6 <= week_day <= 7):
+                                        print('StopWeekEnd schedule matched : ' + instance["InstanceId"])
+                                        if instance["State"]["Name"] == "running":
+                                            print("Stopping instance : " + instance["InstanceId"])
+                                            ec2 = boto3.resource("ec2", region_name=region)
+                                            instance = ec2.Instance(instance["InstanceId"])
+                                            instance.stop()
+                                            flag = True
+                                        else:
+                                            print("Instance not in Running state : " + instance["InstanceId"])
+                                    else:
+                                        print("StopWeekEnd schedule not matched : " + instance["InstanceId"])
+                                    break
+                                else:
+                                    StopWeekEnd_TagFound = False
+
+                if not StopWeekEnd_TagFound:
+                    print("StopWeekEnd Tag Not Found...")
+
+                if not flag:
+                    print ("Instances not available to stop")
+                print("Total Instance Count : " + str(count))
+      Description: >-
+        EC2 Stop Week End Time in HH:MM	(from tag : StopWeekEnd)
+
+  EC2StartWeekEndLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EC2StartWeekEnd
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt
+        - LambdaEC2Role
+        - Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Code:
+        ZipFile: |
+            import boto3
+            import time
+            import datetime
+            import os
+
+            def set_region_tz():
+                timezone_var = None
+                #print(os.environ)
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+
+                try:
+                    timezone_var = os.environ['REGION_TZ']
+                    print("Lambda Environment Variable Key REGION_TZ available : " + str(timezone_var))
+                except Exception as e:
+                    timezone_var = os.environ['TZ']
+                    print("Lambda Environment Variable Key REGION_TZ not available : " + str(timezone_var))
+                print("Timezone Var : " + str(timezone_var))
+
+                if timezone_var is None or timezone_var == '':
+                    timezone = 'UTC'
+                else:
+                    timezone = timezone_var
+                print("Timezone : " + str(timezone))
+
+                os.environ['TZ'] = str(timezone)
+                time.tzset()
+                return
+
+            def lambda_handler(event, context):
+                flag = False
+                set_region_tz()
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+                week_day = datetime.datetime.now().isoweekday()  # Monday is 1 and Sunday is 7
+                time_plus = time_now + datetime.timedelta(minutes=5)
+                time_minus = time_now - datetime.timedelta(minutes=5)
+                aest_time = format(time_now, '%H:%M')
+                print("Week Day : " + str(week_day))
+                print("Time Now in HH:MM : " + aest_time)
+                max_aest_time = format(time_plus,'%H:%M')
+                min_aest_time = format(time_minus,'%H:%M')
+                count = 0
+
+                region = os.environ['AWS_REGION']
+                print("Region : " + str(region))
+
+                ec2 = boto3.client("ec2", region_name=region)
+                description = ec2.describe_instances()
+
+                for instances in description["Reservations"]:
+                    for instance in instances["Instances"]:
+                        #print ('instance :- ' + str(instance))
+                        count = count + 1
+                        if 'Tags' in instance:
+                            for tag in instance["Tags"]:
+                                if (tag["Key"] == "StartWeekEnd"):
+                                    StartWeekEnd_TagFound = True
+                                    startTime = tag["Value"]
+                                    print("StartWeekEnd Start Time : " + startTime)
+                                    if (min_aest_time <= startTime <= max_aest_time and 6 <= week_day <= 7):
+                                        print('StartWeekEnd schedule matched : ' + instance["InstanceId"])
+                                        if instance["State"]["Name"] == "stopped":
+                                            print("Starting instance : " + instance["InstanceId"])
+                                            ec2 = boto3.resource("ec2", region_name=region)
+                                            instance = ec2.Instance(instance["InstanceId"])
+                                            instance.start()
+                                            flag = True
+                                        else:
+                                            print("Instance not in Stopped state : " + instance["InstanceId"])
+                                    else:
+                                        print("StartWeekEnd schedule not matched : " + instance["InstanceId"])
+                                    break
+                                else:
+                                    StartWeekEnd_TagFound = False
+
+                if not StartWeekEnd_TagFound:
+                    print("StartWeekEnd Tag Not Found...")
+
+                if not flag:
+                    print ("Instances not available to start")
+                print("Total Instance Count : " + str(count))
+      Description: >-
+        EC2 Start Week End Time in HH:MM (from tag : StartWeekEnd)
+
+  EC2StartStopWeekEndRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name : EC2StartStopWeekEndRule
+      Description: EC2 Start Stop triggering every Week End every 5 mins
+      ScheduleExpression: !Ref EC2StartStopWeekEndSchedule
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt EC2StartWeekEndLambda.Arn
+          Id: EC2StartWeekEndLambda
+        -
+          Arn: !GetAtt EC2StopWeekEndLambda.Arn
+          Id: EC2StopWeekEndLambda
+
+  EC2StartWeekEndLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EC2StartWeekEndLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn : !GetAtt EC2StartStopWeekEndRule.Arn
+
+  EC2StopWeekEndLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EC2StopWeekEndLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn : !GetAtt EC2StartStopWeekEndRule.Arn
+
+  EC2StopWeekDayLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EC2StopWeekDay
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt
+        - LambdaEC2Role
+        - Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Code:
+        ZipFile: |
+            import boto3
+            import time
+            import datetime
+            import os
+
+            def set_region_tz():
+                timezone_var = None
+                #print(os.environ)
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+
+                try:
+                    timezone_var = os.environ['REGION_TZ']
+                    print("Lambda Environment Variable Key REGION_TZ available : " + str(timezone_var))
+                except Exception as e:
+                    timezone_var = os.environ['TZ']
+                    print("Lambda Environment Variable Key REGION_TZ not available : " + str(timezone_var))
+                print("Timezone Var : " + str(timezone_var))
+
+                if timezone_var is None or timezone_var == '':
+                    timezone = 'UTC'
+                else:
+                    timezone = timezone_var
+                print("Timezone : " + str(timezone))
+
+                os.environ['TZ'] = str(timezone)
+                time.tzset()
+                return
+
+            def lambda_handler(event, context):
+                flag = False
+                set_region_tz()
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+                week_day = datetime.datetime.now().isoweekday()  # Monday is 1 and Sunday is 7
+                time_plus = time_now + datetime.timedelta(minutes=5)
+                time_minus = time_now - datetime.timedelta(minutes=5)
+                aest_time = format(time_now, '%H:%M')
+                print("Week Day : " + str(week_day))
+                print("Time Now in HH:MM : " + aest_time)
+                max_aest_time = format(time_plus,'%H:%M')
+                min_aest_time = format(time_minus,'%H:%M')
+                count = 0
+
+                region = os.environ['AWS_REGION']
+                print("Region : " + str(region))
+
+                ec2 = boto3.client("ec2", region_name=region)
+                description = ec2.describe_instances()
+
+                for instances in description["Reservations"]:
+                    for instance in instances["Instances"]:
+                        #print ('instance :- ' + str(instance))
+                        count = count + 1
+                        if 'Tags' in instance:
+                            for tag in instance["Tags"]:
+                                if (tag["Key"] == "StopWeekDay"):
+                                    StopWeekDay_TagFound = True
+                                    stopTime = tag["Value"]
+                                    print("StopWeekDay Stop Time : " + stopTime)
+                                    if (min_aest_time <= stopTime <= max_aest_time and 1 <= week_day <= 5):
+                                        print('StopWeekDay schedule matched : ' + instance["InstanceId"])
+                                        if instance["State"]["Name"] == "running":
+                                            print("Stopping instance : " + instance["InstanceId"])
+                                            ec2 = boto3.resource("ec2", region_name=region)
+                                            instance = ec2.Instance(instance["InstanceId"])
+                                            instance.stop()
+                                            flag = True
+                                        else:
+                                            print("Instance not in Running state : " + instance["InstanceId"])
+                                    else:
+                                        print("StopWeekDay schedule not matched : " + instance["InstanceId"])
+                                    break
+                                else:
+                                    StopWeekDay_TagFound = False
+
+                if not StopWeekDay_TagFound:
+                    print("StopWeekDay Tag Not Found...")
+
+                if not flag:
+                    print ("Instances not available to stop")
+                print("Total Instance Count : " + str(count))
+      Description: >-
+        EC2 Stop Week Day Time in HH:MM	(from tag : StopWeekDay)
+
+  EC2StartWeekDayLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EC2StartWeekDay
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt
+        - LambdaEC2Role
+        - Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Code:
+        ZipFile: |
+            import boto3
+            import time
+            import datetime
+            import os
+
+            def set_region_tz():
+                timezone_var = None
+                #print(os.environ)
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+
+                try:
+                    timezone_var = os.environ['REGION_TZ']
+                    print("Lambda Environment Variable Key REGION_TZ available : " + str(timezone_var))
+                except Exception as e:
+                    timezone_var = os.environ['TZ']
+                    print("Lambda Environment Variable Key REGION_TZ not available : " + str(timezone_var))
+                print("Timezone Var : " + str(timezone_var))
+
+                if timezone_var is None or timezone_var == '':
+                    timezone = 'UTC'
+                else:
+                    timezone = timezone_var
+                print("Timezone : " + str(timezone))
+
+                os.environ['TZ'] = str(timezone)
+                time.tzset()
+                return
+
+            def lambda_handler(event, context):
+                flag = False
+                set_region_tz()
+
+                time_now = datetime.datetime.now()
+                print("Time Now : " + str(time_now))
+                week_day = datetime.datetime.now().isoweekday()  # Monday is 1 and Sunday is 7
+                time_plus = time_now + datetime.timedelta(minutes=5)
+                time_minus = time_now - datetime.timedelta(minutes=5)
+                aest_time = format(time_now, '%H:%M')
+                print("Week Day : " + str(week_day))
+                print("Time Now in HH:MM : " + aest_time)
+                max_aest_time = format(time_plus,'%H:%M')
+                min_aest_time = format(time_minus,'%H:%M')
+                count = 0
+
+                region = os.environ['AWS_REGION']
+                print("Region : " + str(region))
+
+                ec2 = boto3.client("ec2", region_name=region)
+                description = ec2.describe_instances()
+
+                for instances in description["Reservations"]:
+                    for instance in instances["Instances"]:
+                        #print ('instance :- ' + str(instance))
+                        count = count + 1
+                        if 'Tags' in instance:
+                            for tag in instance["Tags"]:
+                                if (tag["Key"] == "StartWeekDay"):
+                                    StartWeekDay_TagFound = True
+                                    startTime = tag["Value"]
+                                    print("StartWeekDay Start Time : " + startTime)
+                                    if (min_aest_time <= startTime <= max_aest_time and 1 <= week_day <= 5):
+                                        print('StartWeekDay schedule matched : ' + instance["InstanceId"])
+                                        if instance["State"]["Name"] == "stopped":
+                                            print("Starting instance : " + instance["InstanceId"])
+                                            ec2 = boto3.resource("ec2", region_name=region)
+                                            instance = ec2.Instance(instance["InstanceId"])
+                                            instance.start()
+                                            flag = True
+                                        else:
+                                            print("Instance not in Stopped state : " + instance["InstanceId"])
+                                    else:
+                                        print("StartWeekDay schedule not matched : " + instance["InstanceId"])
+                                    break
+                                else:
+                                    StartWeekDay_TagFound = False
+
+                if not StartWeekDay_TagFound:
+                    print("StartWeekDay Tag Not Found...")
+
+                if not flag:
+                    print ("Instances not available to start")
+                print("Total Instance Count : " + str(count))
+      Description: >-
+        EC2 Start Week Day Time in HH:MM (from tag : StartWeekDay)
+
+  EC2StartStopWeekDayRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name : EC2StartStopWeekDayRule
+      Description: EC2 Start Stop triggering every Week Day every 5 mins
+      ScheduleExpression: !Ref EC2StartStopWeekDaySchedule
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt EC2StartWeekDayLambda.Arn
+          Id: EC2StartWeekDayLambda
+        -
+          Arn: !GetAtt EC2StopWeekDayLambda.Arn
+          Id: EC2StopWeekDayLambda
+
+  EC2StartWeekDayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EC2StartWeekDayLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn : !GetAtt EC2StartStopWeekDayRule.Arn
+
+  EC2StopWeekDayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EC2StopWeekDayLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn : !GetAtt EC2StartStopWeekDayRule.Arn
+
+Outputs:
+  RegionTZOutput:
+    Description: AWS Region Timezone
+    Value: !Ref RegionTZ
+
+  AWSRegionOutput:
+    Description: AWS Region
+    Value: !Ref AWS::Region

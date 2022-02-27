@@ -1,0 +1,301 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  This AWS SAM (Serverless Application Model) template creates CFN resources to Schedule Auto Start-Stop of EC2 instances to save cost.
+  This involves creating 6 Lambda functions with IAM Policies and Schedule Events in EventBridge Rules.
+  User also gets 5 Parameter options, in which 4 to be set in EventBridge Rules and 1 to set in Lambda Functions Environment variable.
+  Written by - Pinesh Singal (spinesh@), last modified 27-Feb-2022
+
+Parameters:
+  AutoStartEC2Schedule:
+    Default: cron(0 13 ? * MON-FRI *)
+    Description: Auto Start EC2 Instance (Mon-Fri 9:00 AM EST / 1:00 PM GMT), enter a Schedule expression e.g. cron(0 13 ? * MON-FRI *), see https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  AutoStopEC2Schedule:
+    Default: cron(0 1 ? * MON-FRI *)
+    Description: Auto Stop EC2 Instance (Mon-Fri 9:00 PM EST / 1:00 AM GMT), enter a Schedule expression e.g. cron(0 1 ? * MON-FRI *), see https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  EC2StartStopWeekDaySchedule:
+    Default: cron(*/5 * ? * MON-FRI *)
+    Description: EC2 Start Stop triggering every Week Day every 5 mins
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  EC2StartStopWeekEndSchedule:
+    Default: cron(*/5 * ? * SAT-SUN *)
+    Description: EC2 Start Stop triggering every Week End every 5 mins
+    Type: String
+    MinLength: 20
+    MaxLength: 30
+  RegionTZ:
+    Default: UTC
+    Type: String
+    AllowedValues:
+      - UTC
+      - US/Eastern
+      - US/Pacific
+      - Africa/Johannesburg
+      - Asia/Hong_Kong
+      - Asia/Kolkata
+      - Asia/Tokyo
+      - Asia/Seoul
+      - Asia/Singapore
+      - Australia/Sydney
+      - Canada/Central
+      - Europe/Berlin
+      - Europe/Dublin
+      - Europe/London
+      - Europe/Rome
+      - Europe/Paris
+      - Europe/Stockholm
+      - Asia/Bahrain
+      - America/Sao_Paulo
+    Description: Select Timezone of your Region for execution time in Tags (Set as Lambda Environment Variable Key REGION_TZ)
+
+Resources:
+
+  AutoStartEC2Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: AutoStartEC2Instance
+      Runtime: python3.9
+      MemorySize: 128
+      Handler: AutoStartEC2Instance.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+              Resource: arn:aws:ec2:*:*:instance/*
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+      CodeUri: ./lambda/AutoStartEC2Instance.py
+      Events:
+        AutoStartEC2Rule:
+          Type: Schedule
+          Properties:
+            Name: AutoStartEC2Rule
+            Description: "Auto Start EC2 Instance (Mon-Fri 9:00 AM EST / 1:00 PM GMT)"
+            Schedule: !Ref AutoStartEC2Schedule
+            Enabled: true
+      Description: >-
+        Auto Start EC2 Instance (from tag : AutoStart)
+
+  AutoStopEC2Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: AutoStopEC2Instance
+      Runtime: python3.9
+      MemorySize: 128
+      Handler: AutoStopEC2Instance.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+              Resource: arn:aws:ec2:*:*:instance/*
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+      CodeUri: ./lambda/AutoStopEC2Instance.py
+      Events:
+        AutoStopEC2Rule:
+          Type: Schedule
+          Properties:
+            Name: AutoStopEC2Rule
+            Description: "Auto Stop EC2 Instance (Mon-Fri 9:00 PM EST / 1:00 AM GMT)"
+            Schedule: !Ref AutoStopEC2Schedule
+            Enabled: true
+      Description: >-
+        Auto Stop EC2 Instance (from tag : AutoStop)
+
+  EC2StopWeekDayLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: EC2StopWeekDay
+      Runtime: python3.9
+      MemorySize: 128
+      Handler: EC2StopWeekDay.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+              Resource: arn:aws:ec2:*:*:instance/*
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+      CodeUri: ./lambda/EC2StopWeekDay.py
+      Events:
+        EC2StopWeekDayRule:
+          Type: Schedule
+          Properties:
+            Name: EC2StopWeekDayRule
+            Description: "EC2 Stop triggering every Week Day every 5 mins"
+            Schedule: !Ref EC2StartStopWeekDaySchedule
+            Enabled: true
+      Description: >-
+        EC2 Stop Week Day Time in HH:MM	(from tag : StopWeekDay)
+
+  EC2StartWeekDayLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: EC2StartWeekDay
+      Runtime: python3.9
+      MemorySize: 128
+      Handler: EC2StartWeekDay.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+              Resource: arn:aws:ec2:*:*:instance/*
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+      CodeUri: ./lambda/EC2StartWeekDay.py
+      Events:
+        EC2StartWeekDayRule:
+          Type: Schedule
+          Properties:
+            Name: EC2StartWeekDayRule
+            Description: "EC2 Start triggering every Week Day every 5 mins"
+            Schedule: !Ref EC2StartStopWeekDaySchedule
+            Enabled: true
+      Description: >-
+        EC2 Start Week Day Time in HH:MM (from tag : StartWeekDay)
+
+  EC2StopWeekEndLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: EC2StopWeekEnd
+      Runtime: python3.9
+      MemorySize: 128
+      Handler: EC2StopWeekEnd.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+              Resource: arn:aws:ec2:*:*:instance/*
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+      CodeUri: ./lambda/EC2StopWeekEnd.py
+      Events:
+        EC2StopWeekEndRule:
+          Type: Schedule
+          Properties:
+            Name: EC2StopWeekEndRule
+            Description: "EC2 Stop triggering every Week End every 5 mins"
+            Schedule: !Ref EC2StartStopWeekEndSchedule
+            Enabled: true
+      Description: >-
+        EC2 Stop Week End Time in HH:MM	(from tag : StopWeekEnd)
+
+  EC2StartWeekEndLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: EC2StartWeekEnd
+      Runtime: python3.9
+      MemorySize: 128
+      Handler: EC2StartWeekEnd.lambda_handler
+      Timeout: 60
+      ReservedConcurrentExecutions: 10
+      Environment:
+          Variables:
+            REGION_TZ:
+              Ref: RegionTZ
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:StartInstances
+                - ec2:StopInstances
+              Resource: arn:aws:ec2:*:*:instance/*
+            - Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeTags
+                - ec2:DescribeInstanceStatus
+              Resource: '*'
+      CodeUri: ./lambda/EC2StartWeekEnd.py
+      Events:
+        EC2StartWeekEndRule:
+          Type: Schedule
+          Properties:
+            Name: EC2StartWeekEndRule
+            Description: "EC2 Start triggering every Week End every 5 mins"
+            Schedule: !Ref EC2StartStopWeekEndSchedule
+            Enabled: true
+      Description: >-
+        EC2 Start Week End Time in HH:MM (from tag : StartWeekEnd)
+
+Outputs:
+  RegionTZOutput:
+    Description: AWS Region Timezone
+    Value: !Ref RegionTZ
+
+  AWSRegionOutput:
+    Description: AWS Region
+    Value: !Ref AWS::Region

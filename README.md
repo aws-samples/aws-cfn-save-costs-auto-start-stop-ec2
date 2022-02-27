@@ -26,7 +26,7 @@ To delete all the resources created via this template, choose the stack on the A
 
 
 ### AWS Serverless (SAM) template -
-The AWS SAM template <code>sam_auto_start_stop_rds/sam_auto_start_stop_ec2.yaml</code> automatically creates all the AWS resources required for the Amazon EC2 solution to function. Complete the following steps to deploy this template:
+The AWS SAM template <code>sam_auto_start_stop_ec2/sam_auto_start_stop_ec2.yaml</code> automatically creates all the AWS resources required for the Amazon EC2 solution to function. Complete the following steps to deploy this template:
 
 1.	Open a command prompt.
 2.	Install the AWS SAM CLI, if not installed.
@@ -122,6 +122,10 @@ Following AWS resources are created from this template :
       *	/aws/lambda/EC2StopWeekDay
       *	/aws/lambda/EC2StartWeekEnd
       *	/aws/lambda/EC2StopWeekEnd
+
+
+## Automate Start and Stop of Amazon RDS Instances to Save costs-
+If you want to <b>Automate Start and Stop of Amazon RDS Instances to Save costs</b> and implement same solution on Amazon RDS instance(s), refer GitHub URL https://github.com/aws-samples/aws-cfn-save-costs-auto-start-stop-rds
 
 
 ## Security
